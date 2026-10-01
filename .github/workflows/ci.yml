@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the shell under test
+        run: /bin/bash --version | head -n 1
+
+      - name: Syntax check every script under the system bash
+        run: |
+          for f in install.sh uninstall.sh bin/curl-app tests/*.sh tools/*.sh; do
+            /bin/bash -n "$f" || exit 1
+          done
+
+      - name: shellcheck
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y shellcheck
+          else
+            brew install shellcheck
+          fi
+          shellcheck -S style install.sh uninstall.sh bin/curl-app tests/*.sh tools/*.sh
+
+      - name: SHA256SUMS matches the committed payload
+        run: |
+          sha256sum bin/curl-app > expected.sums 2>/dev/null || shasum -a 256 bin/curl-app > expected.sums
+          diff expected.sums SHA256SUMS
+          rm -f expected.sums
+
+      - name: Anagram app tests
+        run: BASH_BIN=/bin/bash /bin/bash tests/test_anagram.sh
+
+      - name: Installer tests
+        run: BASH_BIN=/bin/bash /bin/bash tests/test_install.sh

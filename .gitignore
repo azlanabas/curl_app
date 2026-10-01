@@ -1,0 +1,4 @@
+# nothing to ignore: everything here is served or shipped
+.DS_Store
+*.tmp
+*.curl_app.bak

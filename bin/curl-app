@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# curl-app — anagram challenge
+#
+# Shows one word. You type a word. It tells you whether yours is an anagram of it.
+#
+#   curl-app                          interactive
+#   curl-app --word LISTEN silent     check 'silent' against 'listen' and exit
+#   curl-app --word LISTEN            check one word read from stdin
+#   curl-app --list                   print the built-in word pairs
+#   curl-app --seed N                 reproducible word choice
+#   curl-app --version | --help
+#
+# Exit codes:  0 anagram · 1 not an anagram · 2 usage error
+#
+# Deliberately bash 3.2 compatible (macOS /bin/bash): no associative arrays, no
+# ${var,,}, no mapfile, no minimum-version features.
+
+set -u
+
+LC_ALL=C
+export LC_ALL
+
+CURL_APP_VERSION="0.1.0"
+PROG="curl-app"
+
+# ------------------------------------------------------------------ colours
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_RESET=$(printf '\033[0m')
+  C_BOLD=$(printf '\033[1m')
+  C_OK=$(printf '\033[32m')
+  C_NO=$(printf '\033[31m')
+  C_DIM=$(printf '\033[2m')
+else
+  C_RESET=''
+  C_BOLD=''
+  C_OK=''
+  C_NO=''
+  C_DIM=''
+fi
+
+# ---------------------------------------------------------------- word pairs
+# One pair per line: <shown> <anagram>. The curated partner is offered as a hint
+# when the answer is wrong; any rearrangement of the letters is accepted.
+PAIRS='listen silent
+heart earth
+night thing
+angle glean
+below elbow
+act cat
+dust stud
+evil vile
+inch chin
+lamp palm
+note tone
+pier ripe
+stop pots
+tale late
+time item
+vase save
+wolf flow
+stone tones
+rescue secure
+master stream
+danger garden
+auction caution
+creative reactive
+meat team
+race care
+sheet these
+alert alter
+bread beard
+resort roster
+north thorn'
+
+# ------------------------------------------------------------------- helpers
+usage() {
+  cat <<'EOF'
+curl-app — anagram challenge
+
+Usage:
+  curl-app                        show one word, then type an anagram of it
+  curl-app --word WORD GUESS      check GUESS against WORD and exit
+  curl-app --word WORD            check one word read from stdin
+  curl-app --list                 print the built-in word pairs
+  curl-app --seed N               reproducible word choice
+  curl-app --version
+  curl-app --help
+
+Exit codes:
+  0  the words are anagrams
+  1  the words are not anagrams
+  2  usage error or empty input
+
+Comparison is letters only: case and punctuation are ignored, so "Night!" matches
+"thing".
+EOF
+}
+
+die_usage() {
+  printf 'error: %s\n' "$1" >&2
+  printf "run 'curl-app --help' for usage\n" >&2
+  exit 2
+}
+
+# lowercase and keep a-z only. ASCII-only is deliberate: the comparison runs under
+# LC_ALL=C so that bash 3.2 and every locale agree.
+# shellcheck disable=SC2018
+norm() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z'; }
+
+# sorted letters: two strings with the same letter multiset produce the same key
+lkey() { printf '%s' "$1" | fold -w1 | sort | tr -d '\n'; }
+
+strlen() { printf '%s' "$1" | wc -c | tr -d '[:space:]'; }
+
+upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
+
+pair_count() { printf '%s\n' "$PAIRS" | grep -c .; }
+
+pair_at() { printf '%s\n' "$PAIRS" | sed -n "$1p"; }
+
+pick_word() {
+  c=$(pair_count)
+  if [ -n "$SEED" ]; then
+    n=$(( (SEED % c) + 1 ))
+  else
+    n=$(( (RANDOM % c) + 1 ))
+  fi
+  p=$(pair_at "$n")
+  SHOWN=$(printf '%s' "$p" | awk '{print $1}')
+  HINT=$(printf '%s' "$p" | awk '{print $2}')
+}
+
+# curated anagram partner for a word, or empty if the word is not in the list
+lookup_hint() {
+  printf '%s\n' "$PAIRS" | awk -v w="$(norm "$1")" '$1 == w { print $2; exit }'
+}
+
+# check_pair <shown> <guess> <hint>  -> prints a verdict, returns 0/1/2
+check_pair() {
+  shown=$1
+  guess=$2
+  hint=${3:-}
+  a=$(norm "$shown")
+  b=$(norm "$guess")
+  if [ -z "$a" ] || [ -z "$b" ]; then
+    printf 'error: empty input — letters only, nothing to compare\n' >&2
+    return 2
+  fi
+  ka=$(lkey "$a")
+  kb=$(lkey "$b")
+  if [ "$ka" = "$kb" ]; then
+    if [ "$a" = "$b" ]; then
+      printf '%s✓ Correct%s — "%s" is the same word as "%s" (identical, not a new anagram)\n' \
+        "$C_OK" "$C_RESET" "$guess" "$shown"
+    else
+      printf '%s✓ Correct%s — "%s" IS an anagram of "%s"  (%s letters)\n' \
+        "$C_OK" "$C_RESET" "$guess" "$shown" "$(strlen "$a")"
+    fi
+    return 0
+  fi
+  printf '%s✗ Not an anagram%s — "%s" is NOT an anagram of "%s"\n' \
+    "$C_NO" "$C_RESET" "$guess" "$shown"
+  if [ -n "$hint" ]; then
+    printf '%sHint: "%s" works.%s\n' "$C_DIM" "$hint" "$C_RESET"
+  fi
+  printf '%sLetters: "%s" (%s) vs "%s" (%s)%s\n' \
+    "$C_DIM" "$a" "$(strlen "$a")" "$b" "$(strlen "$b")" "$C_RESET"
+  return 1
+}
+
+# -------------------------------------------------------------- arg parsing
+WORD=''
+GUESS=''
+SEED=''
+WORD_SET=0
+GUESS_SET=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --version)
+      printf '%s %s\n' "$PROG" "$CURL_APP_VERSION"
+      exit 0
+      ;;
+    --list)
+      printf '%s\n' "$PAIRS"
+      exit 0
+      ;;
+    --word)
+      [ $# -ge 2 ] || die_usage "--word requires a value"
+      WORD=$2
+      WORD_SET=1
+      shift 2
+      ;;
+    --word=*)
+      WORD=${1#--word=}
+      WORD_SET=1
+      shift
+      ;;
+    --seed)
+      [ $# -ge 2 ] || die_usage "--seed requires a number"
+      SEED=$2
+      shift 2
+      ;;
+    --seed=*)
+      SEED=${1#--seed=}
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      die_usage "unknown option: $1"
+      ;;
+    *)
+      if [ "$WORD_SET" -eq 1 ] && [ "$GUESS_SET" -eq 0 ]; then
+        GUESS=$1
+        GUESS_SET=1
+        shift
+      else
+        die_usage "unknown option: $1"
+      fi
+      ;;
+  esac
+done
+
+if [ -n "$SEED" ]; then
+  case "$SEED" in
+    *[!0-9]*) die_usage "--seed must be a non-negative integer" ;;
+  esac
+fi
+
+# ------------------------------------------------------- non-interactive mode
+if [ "$WORD_SET" -eq 1 ]; then
+  if [ "$GUESS_SET" -eq 0 ]; then
+    if ! IFS= read -r GUESS; then
+      GUESS=''
+    fi
+  fi
+  check_pair "$WORD" "$GUESS" "$(lookup_hint "$WORD")"
+  exit $?
+fi
+
+# ----------------------------------------------------------- interactive mode
+pick_word
+printf '\n%s%s%s — Anagram Challenge v%s\n' "$C_BOLD" "$PROG" "$C_RESET" "$CURL_APP_VERSION"
+printf '%sLetters only — case and punctuation are ignored. Type q to quit.%s\n' "$C_DIM" "$C_RESET"
+
+while :; do
+  printf '\n%sYour word:  %s%s\n\n' "$C_BOLD" "$(upper "$SHOWN")" "$C_RESET"
+  printf 'Your anagram: '
+  if ! IFS= read -r GUESS; then
+    printf '\n'
+    break
+  fi
+  case "$GUESS" in
+    q|Q|quit|exit) break ;;
+  esac
+  if [ -z "$(norm "$GUESS")" ]; then
+    printf 'error: empty input — letters only\n' >&2
+    continue
+  fi
+  check_pair "$SHOWN" "$GUESS" "$HINT"
+  if [ ! -t 0 ]; then
+    printf '\n'
+    break
+  fi
+  pick_word
+done
+
+printf '\nThanks for playing.\n'
+exit 0
